@@ -1,10 +1,10 @@
 import pandas as pd
 import streamlit as st 
 import os
-    
 
 
-file_path = "est_5.xlsx"
+
+file_path = "est_7.xlsx"
 
 #app title
 st.title("COST ESTIMATOR (Tinkering, R&R, Painting)")   
@@ -112,61 +112,63 @@ selected_paint_type = st.selectbox("🎨 Select Paint Type", paint_types)
 #garage type
 garage_type=st.radio("🏭 Select Garage Type",["A","B","C","D"])
 
-#damaged parts input table wise?
-st.subheader("🧹 Select Damaged Parts ")
 
-def_rows = 5
-manual_parts_df = pd.DataFrame({
-    "Part": [""] * def_rows,
-    "Paint Discount (%)": [0] * def_rows
-})
+st.subheader("🧹 Select Damaged Parts")
 
-# Default template for manual entry
-manual_parts_df = pd.DataFrame({
-    "Part": [""],
-    "Paint Discount (%)": [0.0]
-})
+# Get valid parts
+all_parts = df_paint.columns.str.strip().str.upper().tolist()
+valid_parts = [part for part in all_parts if part not in ["MAKER", "MODEL", "YEAR", "CITY", "W_METALLIC/SOLID"]]
 
-
-# Editable table for user input
-user_parts_df = st.data_editor(
-    manual_parts_df,
-    num_rows="dynamic",
-    use_container_width=True,
-    hide_index=True,
-    column_config={
-        "Part": st.column_config.TextColumn("Part"),
-        "Paint Discount (%)": st.column_config.NumberColumn(
-            "Paint Discount (%)",
-            min_value=0.0,
-            max_value=100.0,
-            step=0.1,
-            format="%.1f"
-        )
-    },
-    key="manual_parts"
+# Autocomplete part selector
+selected_parts_list = st.multiselect(
+    "🔧 Choose parts from database",
+    options=sorted(valid_parts),
+    help="Start typing to search from known parts in Excel"
 )
 
+if selected_parts_list:
+    # Create editable part table
+    manual_parts_df = pd.DataFrame({
+        "Part": selected_parts_list,
+        "Disc %": [0.0] * len(selected_parts_list),
+        "R&R?": ["No"] * len(selected_parts_list),
+        "R&R Cost": ["" for _ in selected_parts_list],
+        "Tinkering?": ["No"] * len(selected_parts_list),
+        "Tinkering Cost": ["" for _ in selected_parts_list]
+    })
 
+    # Show editable table
+    user_parts_df = st.data_editor(
+        manual_parts_df,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        column_config={
+            "Part": st.column_config.TextColumn("Part", disabled=True),
+            "Disc %": st.column_config.NumberColumn("Disc(%)", min_value=0.0, max_value=100.0, step=0.1),
+            "R&R?": st.column_config.SelectboxColumn("R&R?", options=["Yes", "No"]),
+            "R&R Cost": st.column_config.TextColumn("Cost(optional)"),
+            "Tinkering?": st.column_config.SelectboxColumn("Tinkering?", options=["Yes", "No"]),
+            "Tinkering Cost": st.column_config.TextColumn("Cost(optional)")
+        },
+        key="manual_parts_editor"
+    )
 
-# Normalize and clean user input
-user_parts_df["Part"] = user_parts_df["Part"].astype(str).str.strip().str.upper()
+    # Normalize and filter parts
+    user_parts_df["Part"] = user_parts_df["Part"].astype(str).str.strip().str.upper()
+    selected_parts = user_parts_df[user_parts_df["Part"] != ""]
 
-# Ensure Paint Discount column exists
-if "Paint Discount (%)" not in user_parts_df.columns:
-    user_parts_df["Paint Discount (%)"] = 0.0
+    # ✅ Continue with your logic from here (paint/labour lookup, calculation, etc.)
 
-# Filter only filled parts
-selected_parts = user_parts_df[user_parts_df["Part"] != ""]
+else:
+    st.info("ℹ️ Please select at least one part to proceed.")
+
 
 if not selected_parts.empty:
     st.markdown("### ✅ Selected Parts")
-    st.table(selected_parts[["Part", "Paint Discount (%)"]])
+    st.table(selected_parts[["Part", "Disc %", "R&R?", "Tinkering?"]])
 
-    st.subheader("📊 Final Estimate Table")
-    garage_discounts = {"A": 0.0, "B": 0.8, "C": 0.5, "D": 1.0}
-    discount_rate = garage_discounts.get(garage_type.upper(), 0)
-
+    # Fetch paint and labour data rows from Excel
     paint_row = df_paint[
         (df_paint["MAKER"] == selected_maker) &
         (df_paint["MODEL"] == selected_model) &
@@ -185,61 +187,105 @@ if not selected_parts.empty:
     if paint_row.empty or labour_row.empty:
         st.error("❌ No matching data found for the selected inputs.")
     else:
+        # Extract the single matching row
         paint_row = paint_row.iloc[0].copy()
         labour_row = labour_row.iloc[0].copy()
-        paint_row.index = pd.Index([str(i).strip().upper() for i in paint_row.index])
-        labour_row.index = pd.Index([str(i).strip().upper() for i in labour_row.index])
 
+        # Normalize part names (column headers)
+        paint_row.index = paint_row.index.str.strip().str.upper()
+        labour_row.index = labour_row.index.str.strip().str.upper()
+
+        # Cost totals
         results = []
         total_painting = 0.0
         total_tinkering = 0.0
-        total_rnr = 0.0 
+        total_rnr = 0.0
 
         for _, row in selected_parts.iterrows():
-            part = row["Part"]
+            part = row["Part"].strip().upper()
             try:
-                custom_discount = float(row.get("Paint Discount (%)", 0)) / 100
+                custom_discount = float(row.get("Disc %", 0)) / 100
             except:
                 custom_discount = 0
 
-            paint_schedule = paint_row.get(part, 0)
-            base_cost = labour_row.get(part, 0)
-
-            try:
-                paint_schedule = float(paint_schedule) if not pd.isna(paint_schedule) else 0
-            except:
+            # --- Painting Cost ---
+            if part in paint_row:
+                try:
+                    paint_schedule = float(paint_row[part])
+                except:
+                    paint_schedule = 0
+            else:
+                st.warning(f"⚠️ No paint schedule found for part: {part}")
                 paint_schedule = 0
 
-            try:
-                base_cost = float(base_cost) if not pd.isna(base_cost) else 0
-            except:
+            paint_cost = paint_schedule * custom_discount
+
+            # --- Labour Cost ---
+            if part in labour_row:
+                try:
+                    base_cost = float(labour_row[part])
+                except:
+                    base_cost = 0
+            else:
+                st.warning(f"⚠️ No labour cost found for part: {part}")
                 base_cost = 0
 
-            tinkering_cost = base_cost * 3300 if part in tinkering_parts else 0
-            rnr_cost = base_cost * 3300 if part in rnr_parts else 0
-            paint_cost = paint_schedule * custom_discount  # use user-entered discount
+            # --- Tinkering ---
+            tinkering_cost = 0
+            if row.get("Tinkering?") == "Yes":
+                try:
+                    tinkering_cost = float(row.get("Tinkering Cost", ""))
+                except:
+                    tinkering_cost = base_cost * 3300 if part in tinkering_parts else 0
 
+            # --- R&R ---
+            rnr_cost = 0
+            if row.get("R&R?") == "Yes":
+                try:
+                    rnr_cost = float(row.get("R&R Cost", ""))
+                except:
+                    rnr_cost = base_cost * 3300 if part in rnr_parts else 0
+
+            # --- Totals and Result Table ---
             total_tinkering += tinkering_cost
             total_rnr += rnr_cost
             total_painting += paint_cost
 
             results.append({
                 "Description": part,
-                "Tinkering": round(tinkering_cost, 2),
+
                 "R&R": round(rnr_cost, 2),
+                "Tinkering": round(tinkering_cost, 2),
                 "Painting": round(paint_cost, 2),
-                "Paint Discount (%)": round(custom_discount * 100, 2),
+                "Disc %": round(custom_discount * 100, 2),
                 "Schedule": round(paint_schedule, 2)
             })
 
+        # Convert results to DataFrame
         final_df = pd.DataFrame(results)
-        st.dataframe(final_df)
+        final_df.index = range(1, len(final_df) + 1)
+        final_df.index.name = "S.No"
 
+        # Display final table
+        st.markdown("### 💰 Final Estimate")
+        st.dataframe(final_df, use_container_width=True)
+
+        # Show summary totals
         st.subheader("🧾 Summary")
-        st.table(pd.DataFrame([
-            {"Description": "Sub Total", "Tinkering": round(total_tinkering, 2), "R&R": round(total_rnr, 2), "Painting": round(total_painting, 2)},
-            {"Description": "Grand Total", "Tinkering": "", "R&R": "", "Painting": round(total_tinkering + total_rnr + total_painting, 2)}
-        ]))
-
+        summary_df = pd.DataFrame([
+            {
+                "Description": "Sub Total",
+                "R&R": round(total_rnr, 2),
+                "Tinkering": round(total_tinkering, 2),
+                "Painting": round(total_painting, 2)
+            },
+            {
+                "Description": "Grand Total",
+                "R&R": "",
+                "Tinkering": "",
+                "Painting": round(total_rnr + total_tinkering + total_painting, 2)
+            }
+        ])
+        st.table(summary_df)
 else:
     st.info("ℹ️ Please enter damaged parts above to generate the cost estimate.")
